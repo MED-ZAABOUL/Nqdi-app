@@ -1,0 +1,157 @@
+# ════════════════════════════════════════════════════════════════════
+#  Nqdi — CodeMagic CI/CD Pipeline
+#  Builds release, split-per-ABI, tree-shaken Android APKs.
+#
+#  Design principle: existing source content is READ-ONLY. The pipeline
+#  may EXTRACT a project .zip that ships in the repo (adding files), but
+#  no step edits, formats, or rewrites a Dart file, asset, or pubspec.
+#  An integrity gate enforces that already-tracked files are never
+#  overwritten by the extraction.
+# ════════════════════════════════════════════════════════════════════
+
+workflows:
+  android-release:
+    name: Nqdi Android Release (split-per-abi)
+
+    # Most efficient generally-available instance for Android-only builds.
+    # Linux provisions faster and costs less than mac for pure-APK work,
+    # which needs no macOS toolchain. Use `mac_mini_m2` only if you add iOS.
+    instance_type: linux_x2
+    max_build_duration: 60
+
+    environment:
+      flutter: stable          # latest stable Flutter 3.x (bundles Dart 3.x)
+      java: 17                 # required by the modern Android Gradle Plugin
+      vars:
+        FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    triggering:
+      events:
+        - push
+        - pull_request
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
+
+    scripts:
+      # ── 0. Toolchain visibility ──────────────────────────────────
+      - name: Print toolchain versions
+        script: |
+          flutter --version
+          dart --version
+
+      # ── 1. EXTRACT project .zip (runs BEFORE deps) ───────────────
+      #    Finds any *.zip in the repo root and extracts it into the
+      #    current directory. `unzip -n` = never overwrite: existing
+      #    tracked files always win, so committed source is preserved.
+      #    If the zip nests everything under a top folder (e.g.
+      #    nqdi_flutter/), its contents are lifted up so `lib/` lands
+      #    at the project root where Flutter expects it.
+      #
+      #    ⚠ IMPORTANT: because of no-overwrite, if BOTH a committed
+      #    pubspec.yaml AND a zip pubspec.yaml exist, the committed one
+      #    wins. Make sure your committed pubspec.yaml is the corrected
+      #    one (intl ^0.20.2), or the stale version will be used.
+      - name: Extract project archive
+        script: |
+          set -e
+          shopt -s nullglob
+          zips=( *.zip )
+
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "ℹ No .zip in root — assuming source is already present."
+          else
+            for z in "${zips[@]}"; do
+              echo "▶ Extracting $z (no-overwrite mode)…"
+              unzip -n -q "$z" -d .
+            done
+
+            # If lib/ isn't at root but exists one level down inside an
+            # extracted folder, lift that folder's contents up to root.
+            if [ ! -d "lib" ]; then
+              nested="$(find . -maxdepth 2 -type d -name lib \
+                         -not -path './lib' 2>/dev/null | head -n 1)"
+              if [ -n "$nested" ]; then
+                top="$(dirname "$nested")"
+                echo "▶ Promoting extracted project from '$top' to root…"
+                shopt -s dotglob
+                mv -n "$top"/* . 2>/dev/null || true
+                shopt -u dotglob
+              fi
+            fi
+          fi
+
+          # Hard fail early if lib/ still isn't reachable.
+          if [ ! -d "lib" ]; then
+            echo "✗ 'lib' folder not found after extraction — cannot build."
+            exit 1
+          fi
+          echo "✓ 'lib' folder is present and accessible."
+
+      # ── 2. Sanity-check the resolved pubspec (catch stale intl) ──
+      #    Surfaces exactly which intl constraint will be used BEFORE
+      #    resolution, so a stale ^0.19.0 is obvious in the logs instead
+      #    of failing cryptically inside `pub get`.
+      - name: Show effective intl constraint
+        script: |
+          echo "▶ intl constraint in the pubspec that will actually be used:"
+          grep -nE '^\s*intl\s*:' pubspec.yaml || echo "  (intl not pinned — SDK transitive only, fine)"
+
+      # ── 3. SELF-HEALING PRE-BUILD (environment auto-fixer) ───────
+      #    Touches ONLY machine state: build output, global pub cache,
+      #    and the resolved dependency tree. Never tracked source.
+      #
+      #    `flutter pub get` resolves within your declared constraints.
+      #    With intl ^0.20.2 this satisfies the SDK's flutter_localizations
+      #    (which pins intl 0.20.2) and version solving succeeds.
+      - name: Pre-build self-heal (clean / cache repair / fresh deps)
+        script: |
+          set -e
+          echo "▶ flutter clean — wipe stale build/ & .dart_tool artifacts"
+          flutter clean
+
+          echo "▶ flutter pub cache repair — re-download corrupt cached packages"
+          flutter pub cache repair
+
+          echo "▶ flutter pub get — resolve a healthy dependency tree"
+          flutter pub get
+
+      # ── 4. Read-only integrity gate ──────────────────────────────
+      #    Fails the build if any file that was ALREADY TRACKED in git
+      #    got modified. Newly extracted (untracked) files are allowed —
+      #    that's the legitimate output of the unzip step.
+      #
+      #    NOTE: pubspec.lock is intentionally excluded — `pub get` may
+      #    legitimately refresh it, and that is not a source-code change.
+      - name: Verify tracked source is unmodified
+        script: |
+          set -e
+          changed="$(git diff --name-only -- . ':(exclude)pubspec.lock')"
+          staged="$(git diff --cached --name-only -- . ':(exclude)pubspec.lock')"
+          if [ -n "$changed$staged" ]; then
+            echo "✗ Tracked source changed during pre-build — aborting:"
+            echo "$changed$staged"
+            exit 1
+          fi
+          echo "✓ No tracked source files were modified."
+
+      # ── 5. BUILD — release, split-per-ABI, tree-shaken icons ─────
+      - name: Build release APKs
+        script: |
+          set -e
+          flutter build apk --release --split-per-abi --tree-shake-icons
+
+    # ── 6. ARTIFACTS — surfaced in the CodeMagic build summary ─────
+    artifacts:
+      - build/app/outputs/flutter-apk/*.apk
+      - build/app/outputs/apk/release/*.apk
+      - build/app/outputs/mapping/release/mapping.txt
+
+    publishing:
+      email:
+        recipients:
+          - your-email@example.com   # ← replace with your address
+        notify:
+          success: true
+          failure: true
