@@ -1,0 +1,49 @@
+name: nqdi
+description: "نقدي — Moroccan Darija personal budgeting app."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.7.0
+  flutter: ">=3.32.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # State management (MVVM / clean separation of UI and logic)
+  flutter_riverpod: ^2.6.1
+
+  # Charts (pie + comparison visualisations)
+  fl_chart: ^0.69.2
+
+  # Lottie — optional richer tree/celebration animations. The current build
+  # draws the tree with CustomPainter, but this is here so you can drop in a
+  # Lottie file for the victory burst if desired.
+  lottie: ^3.1.3
+
+  # Number / date formatting with Arabic (ar_MA) locale support
+  intl: ^0.20.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+
+  # Cairo typeface — matches the original web app. This is a VARIABLE
+  # font: the single file below contains every weight (200–1000), so we
+  # declare it once. The CI pipeline downloads it automatically from the
+  # official Google Fonts repo; or place it here manually before building.
+  fonts:
+    - family: Cairo
+      fonts:
+        - asset: assets/fonts/Cairo-Variable.ttf
+
+  # Uncomment if you add a Lottie animation:
+  # assets:
+  #   - assets/lottie/
